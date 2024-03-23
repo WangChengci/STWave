@@ -6,7 +6,6 @@ import argparse
 import numpy as np
 import configparser
 from tqdm import tqdm
-from lib import utils
 from model.models import STWave
 from lib.graph_utils import loadGraph
 from lib.utils import log_string, loadData, _compute_loss, metric, disentangle
@@ -22,9 +21,7 @@ class Solver(object):
         self.trainX, self.trainY, self.trainTE, \
             self.valX, self.valY, self.valTE, \
             self.testX, self.testY, self.testTE, \
-            self.mean, self.std, data = loadData(
-            self.traffic_file, self.input_len, self.output_len,
-            self.train_ratio, self.test_ratio, log)
+            self.mean, self.std, data = loadData(self.traffic_file, self.input_len, self.output_len, self.train_ratio, self.test_ratio, log)
         self.localadj, self.spawave, self.temwave = loadGraph(self.adj_file, self.tem_adj_file, self.heads * self.dims,
                                                               data, log)
         log_string(log, '------------ End -------------\n')

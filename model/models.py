@@ -58,6 +58,46 @@ class FeedForward(nn.Module):
             x = self.ln(x)
         return x
 
+
+class Spatial_Attention_Layer(nn.Module):
+    def __init__(self, dropout=0.3):
+        super(Spatial_Attention_Layer, self).__init__()
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        """
+        :param x:(B, T, N, F)
+        :return:(B, T, N, N)
+        """
+        batch_size, time_steps, num_nodes, input_len = x.shape
+        x = x.reshape((-1, num_nodes, input_len))  # (B, T, N, F) -> (B*T, N, F)
+        score = torch.matmul(x, x.transpose(1, 2)) / math.sqrt(input_len)  # (B*T, N, F)(B*T, F, N) --matmul-> (B*T, N, N)
+        score = self.dropout(F.softmax(score,dim=-1))
+        return score.reshape((batch_size, time_steps, num_nodes, num_nodes))
+
+
+class SpatialAttentionScaledGCN(nn.Module):
+    def __init__(self, norm_adj_matrix, dropout=0.3):
+        super(SpatialAttentionScaledGCN, self).__init__()
+        self.norm_Adj_matrix = norm_adj_matrix
+        self.SAT = Spatial_Attention_Layer(dropout=dropout)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        """
+        :param x:(B, T, N, F)
+        :return:(B, T, N, F)
+        """
+        batch_size, time_steps, num_nodes, input_len = x.shape
+        output_len = input_len
+        spatial_attention = self.SAT(x) / math.sqrt(input_len)
+        x = x.reshape((-1, num_nodes, input_len))  # (B, T, N, F) -> (B*T, N, F)
+        spatial_attention = spatial_attention.reshape((-1, num_nodes, num_nodes))  # (B*T, N, N)
+        x = F.relu(torch.matmul(self.norm_Adj_matrix.mul(spatial_attention), x)).reshape((batch_size, time_steps, num_nodes, output_len))
+        # (B*T, N, F) --reshape--> (B, T, N, F)
+        return self.dropout(x)
+
+
 class Sparse_Spatial_Attention(nn.Module):
     def __init__(self, heads, dims, samples, localadj):
         super(Sparse_Spatial_Attention, self).__init__()
