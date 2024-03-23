@@ -54,7 +54,13 @@ def seq2instance(data, P, Q):
     return x, y
 
 def disentangle(x, w, j):
-    x = x.transpose(0,3,2,1) # [S,D,N,T]
+    """
+    :param x:输入数据
+    :param w:用于小波变换的波形
+    :param j:小波变换的层级
+    :return: xl:低频数据; xh:高频数据
+    """
+    x = x.transpose(0, 3, 2, 1)  # [S,D,N,T]
     coef = pywt.wavedec(x, w, level=j)
     coefl = [coef[0]]
     for i in range(len(coef)-1):
@@ -62,8 +68,8 @@ def disentangle(x, w, j):
     coefh = [None]
     for i in range(len(coef)-1):
         coefh.append(coef[i+1])
-    xl = pywt.waverec(coefl, w).transpose(0,3,2,1)
-    xh = pywt.waverec(coefh, w).transpose(0,3,2,1)
+    xl = pywt.waverec(coefl, w).transpose(0, 3, 2, 1)
+    xh = pywt.waverec(coefh, w).transpose(0, 3, 2, 1)
 
     return xl, xh
 
@@ -72,8 +78,11 @@ def loadData(filepath, P, Q, train_ratio, test_ratio, log):
     Traffic = np.load(filepath)['data'][...,:1]
     num_step = Traffic.shape[0]
     TE = np.zeros([num_step, 2])
-    TE[:,1] = np.array([i % 288 for i in range(num_step)])
-    TE[:,0] = np.array([(i // 288) % 7 for i in range(num_step)])
+    # 在一周的哪一天？
+    TE[:, 0] = np.array([(i // 288) % 7 for i in range(num_step)])
+    # 在一天的哪个时刻？ => 1h有12个记录（5min），1天24h    12*24=288
+    TE[:, 1] = np.array([i % 288 for i in range(num_step)])
+    # 将TE扩展成TE_tile，以匹配Traffic的维度
     TE_tile = np.repeat(np.expand_dims(TE, 1), Traffic.shape[1], 1)
     log_string(log, f'Shape of data: {Traffic.shape}')
     # train/val/test 

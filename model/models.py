@@ -210,7 +210,7 @@ class Dual_Enconder(nn.Module):
         super(Dual_Enconder, self).__init__()
         self.temporal_conv = TemporalConvNet(heads * dims)
         self.temporal_att = TemporalAttention(heads, dims)
-        
+
         self.spatial_att_l = Sparse_Spatial_Attention(heads, dims, samples, localadj)
         self.spatial_att_h = Sparse_Spatial_Attention(heads, dims, samples, localadj)
         
@@ -229,9 +229,13 @@ class Dual_Enconder(nn.Module):
         te: [B,T,N,F]
         return: [B,T,N,F]
         '''
-        xl = self.temporal_att(xl, te) # [B,T,N,F]
-        xh = self.temporal_conv(xh) # [B,T,N,F]
-        
+        # Temporal Dim
+        # # trend
+        xl = self.temporal_att(xl, te)  # [B,T,N,F]
+        # # events
+        xh = self.temporal_conv(xh)  # [B,T,N,F]
+
+        # Spatial Dim
         spa_statesl = self.spatial_att_l(xl, self.spa_eigvalue, self.spa_eigvec.to(xl.device), self.tem_eigvalue, self.tem_eigvec.to(xl.device)) # [B,T,N,F]
         spa_statesh = self.spatial_att_h(xh, self.spa_eigvalue, self.spa_eigvec.to(xl.device), self.tem_eigvalue, self.tem_eigvec.to(xl.device)) # [B,T,N,F]
         xl = spa_statesl + xl
@@ -325,20 +329,25 @@ class STWave(nn.Module):
         self.te_emb = TemEmbedding(features)
 
     def forward(self, XL, XH, TE):
-        '''
+        """
         XL: [B,T,N,F]
         XH: [B,T,N,F]
         TE: [B,T,2]
-        return: [B,T,N,1]
-        '''
+        :return: [B,T,N,1]
+        """
+        # 嵌入
         xl, xh = self.start_emb_l(XL), self.start_emb_h(XH)
         te = self.te_emb(TE)
+        # xl, xh, te.shape = (B, T, N, F)
         
         for enc in self.dual_enc:
-            xl, xh = enc(xl, xh, te[:,:self.input_len,:,:])
-        
+            xl, xh = enc(xl, xh, te[:, :self.input_len, :, :])
+
+        # 全连接层self.pre_l() == self.pre_h()
         hat_y_l = self.pre_l(xl)
         hat_y_h = self.pre_h(xh)
+        # trend部分直接返回，计算Loss_trend ==> 低通部分
+        # events部分通过Adaptive Event Fusion部分，结合trend的预测结果，再返回，计算Loss_events ==> 低通部分
         hat_y = self.adp_f(hat_y_l, hat_y_h, te[:,self.input_len:,:,:])
         hat_y, hat_y_l = self.end_emb(hat_y), self.end_emb_l(hat_y_l)
         
