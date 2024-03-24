@@ -1,5 +1,6 @@
 import math
 import torch
+import pandas as pd
 import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
@@ -94,6 +95,7 @@ class SpatialAttentionScaledGCN(nn.Module):
         x = x.reshape((-1, num_nodes, input_len))  # (B, T, N, F) -> (B*T, N, F)
         spatial_attention = spatial_attention.reshape((-1, num_nodes, num_nodes))  # (B*T, N, N)
         x = F.relu(torch.matmul(self.norm_Adj_matrix.mul(spatial_attention), x)).reshape((batch_size, time_steps, num_nodes, output_len))
+        # matmul[(B*T, N, N)((B*T, N, F))]
         # (B*T, N, F) --reshape--> (B, T, N, F)
         return self.dropout(x)
 
@@ -246,21 +248,23 @@ class TemporalConvNet(nn.Module):
         return xh
     
 class Dual_Enconder(nn.Module):
-    def __init__(self, heads, dims, samples, localadj, spawave, temwave):
+    def __init__(self, heads, dims, norm_adj_matrix, dropout):
         super(Dual_Enconder, self).__init__()
         self.temporal_conv = TemporalConvNet(heads * dims)
         self.temporal_att = TemporalAttention(heads, dims)
+        self.spatial_att_l = SpatialAttentionScaledGCN(norm_adj_matrix, dropout)
+        self.spatial_att_h = SpatialAttentionScaledGCN(norm_adj_matrix, dropout)
 
-        self.spatial_att_l = Sparse_Spatial_Attention(heads, dims, samples, localadj)
-        self.spatial_att_h = Sparse_Spatial_Attention(heads, dims, samples, localadj)
+        # self.spatial_att_l = Sparse_Spatial_Attention(heads, dims, samples, localadj)
+        # self.spatial_att_h = Sparse_Spatial_Attention(heads, dims, samples, localadj)
         
-        spa_eigvalue = torch.from_numpy(spawave[0].astype(np.float32))
-        self.spa_eigvalue = nn.Parameter(spa_eigvalue, requires_grad=True)        
-        self.spa_eigvec = torch.from_numpy(spawave[1].astype(np.float32))
-
-        tem_eigvalue = torch.from_numpy(temwave[0].astype(np.float32))
-        self.tem_eigvalue = nn.Parameter(tem_eigvalue, requires_grad=True)        
-        self.tem_eigvec = torch.from_numpy(temwave[1].astype(np.float32))
+        # spa_eigvalue = torch.from_numpy(spawave[0].astype(np.float32))
+        # self.spa_eigvalue = nn.Parameter(spa_eigvalue, requires_grad=True)
+        # self.spa_eigvec = torch.from_numpy(spawave[1].astype(np.float32))
+        #
+        # tem_eigvalue = torch.from_numpy(temwave[0].astype(np.float32))
+        # self.tem_eigvalue = nn.Parameter(tem_eigvalue, requires_grad=True)
+        # self.tem_eigvec = torch.from_numpy(temwave[1].astype(np.float32))
         
     def forward(self, xl, xh, te):
         '''
@@ -271,15 +275,17 @@ class Dual_Enconder(nn.Module):
         '''
         # Temporal Dim
         # # trend
-        xl = self.temporal_att(xl, te)  # [B,T,N,F]
+        xl = self.temporal_att(xl, te)  # (B, T, N, F)
         # # events
-        xh = self.temporal_conv(xh)  # [B,T,N,F]
+        xh = self.temporal_conv(xh)  # (B, T, N, F)
 
         # Spatial Dim
-        spa_statesl = self.spatial_att_l(xl, self.spa_eigvalue, self.spa_eigvec.to(xl.device), self.tem_eigvalue, self.tem_eigvec.to(xl.device)) # [B,T,N,F]
-        spa_statesh = self.spatial_att_h(xh, self.spa_eigvalue, self.spa_eigvec.to(xl.device), self.tem_eigvalue, self.tem_eigvec.to(xl.device)) # [B,T,N,F]
-        xl = spa_statesl + xl
-        xh = spa_statesh + xh
+        spa_att_gcn_l = self.spatial_att_l(xl)
+        spa_att_gcn_h = self.spatial_att_l(xh)  # (B, T, N, F)
+        # spa_statesl = self.spatial_att_l(xl, self.spa_eigvalue, self.spa_eigvec.to(xl.device), self.tem_eigvalue, self.tem_eigvec.to(xl.device)) # [B,T,N,F]
+        # spa_statesh = self.spatial_att_h(xh, self.spa_eigvalue, self.spa_eigvec.to(xl.device), self.tem_eigvalue, self.tem_eigvec.to(xl.device)) # [B,T,N,F]
+        xl = spa_att_gcn_l + xl
+        xh = spa_att_gcn_h + xh
         
         return xl, xh
 
@@ -344,18 +350,16 @@ class Adaptive_Fusion(nn.Module):
         return self.ff(value)
     
 class STWave(nn.Module):
-    def __init__(self, heads,
-                dims, layers, samples,
-                localadj, spawave, temwave,
-                input_len, output_len):
-        
+    def __init__(self, heads, dims, layers, norm_adj_matrix, dropout, input_len, output_len):
         super(STWave, self).__init__()
         features = heads * dims
-        I = torch.arange(localadj.shape[0]).unsqueeze(-1)
-        localadj = torch.cat([I, torch.from_numpy(localadj)], -1)
+        # I = torch.arange(localadj.shape[0]).unsqueeze(-1)
+        # adj_mx = np.array(pd.read_csv(args.A_STAG, header=None))
+        # norm_adj_matrix = torch.from_numpy(norm_Adj(adj_mx)).type(torch.FloatTensor).to("cuda:0")
+        # localadj = torch.cat([I, torch.from_numpy(localadj)], -1)
         self.input_len = input_len
 
-        self.dual_enc = nn.ModuleList([Dual_Enconder(heads, dims, samples, localadj, spawave, temwave) for i in range(layers)])
+        self.dual_enc = nn.ModuleList([Dual_Enconder(heads, dims, norm_adj_matrix, dropout) for i in range(layers)])
         self.adp_f = Adaptive_Fusion(heads, dims)
         
         self.pre_l = nn.Conv2d(input_len, output_len, (1,1))
@@ -388,7 +392,7 @@ class STWave(nn.Module):
         hat_y_h = self.pre_h(xh)
         # trend部分直接返回，计算Loss_trend ==> 低通部分
         # events部分通过Adaptive Event Fusion部分，结合trend的预测结果，再返回，计算Loss_events ==> 低通部分
-        hat_y = self.adp_f(hat_y_l, hat_y_h, te[:,self.input_len:,:,:])
+        hat_y = self.adp_f(hat_y_l, hat_y_h, te[:,self.input_len:, :, :])
         hat_y, hat_y_l = self.end_emb(hat_y), self.end_emb_l(hat_y_l)
         
         return hat_y, hat_y_l

@@ -1,6 +1,7 @@
 import os
 import math
 import numpy as np
+import torch
 from tqdm import tqdm
 import scipy.sparse as sp
 from fastdtw import fastdtw
@@ -46,6 +47,32 @@ def construct_tem_adj(data, num_node):
     tem_matrix[dtw_distance <= nth] = 1
     tem_matrix = np.logical_or(tem_matrix, tem_matrix.T)
     return tem_matrix
+
+def norm_Adj(W):
+    '''
+    compute  normalized Adj matrix
+
+    Parameters
+    ----------
+    W: np.ndarray, shape is (N, N), N is the num of vertices
+
+    Returns
+    ----------
+    normalized Adj matrix: (D^hat)^{-1} A^hat; np.ndarray, shape (N, N)
+    '''
+    assert W.shape[0] == W.shape[1]
+
+    N = W.shape[0]
+    W = W + np.identity(N)  # 为邻接矩阵加上自连接
+    D = np.diag(1.0/np.sum(W, axis=1))
+    norm_adj_matrix = np.dot(D, W)
+
+    return norm_adj_matrix
+def get_norm_adj(spatial_graph):
+    adj_mx = np.load(spatial_graph)
+    norm_adj_matrix = torch.from_numpy(norm_Adj(adj_mx)).type(torch.FloatTensor)
+    return norm_adj_matrix
+
 
 def loadGraph(spatial_graph, temporal_graph, dims, data, log):
     # calculate spatial and temporal graph wavelets

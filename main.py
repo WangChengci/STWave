@@ -7,8 +7,10 @@ import numpy as np
 import configparser
 from tqdm import tqdm
 from model.models import STWave
-from lib.graph_utils import loadGraph
+from lib.graph_utils import loadGraph, get_norm_adj
 from lib.utils import log_string, loadData, _compute_loss, metric, disentangle
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
 
 
 class Solver(object):
@@ -22,26 +24,31 @@ class Solver(object):
             self.valX, self.valY, self.valTE, \
             self.testX, self.testY, self.testTE, \
             self.mean, self.std, data = loadData(self.traffic_file, self.input_len, self.output_len, self.train_ratio, self.test_ratio, log)
-        self.localadj, self.spawave, self.temwave = loadGraph(self.adj_file, self.tem_adj_file, self.heads * self.dims,
-                                                              data, log)
+
+        self.localadj, self.spawave, self.temwave = loadGraph(self.adj_file, self.tem_adj_file, self.heads * self.dims, data, log)
+        self.device = torch.device(f"cuda:{self.cuda}" if torch.cuda.is_available() else "cpu")
+        self.norm_adj_matrix = get_norm_adj(self.adj_file).to(self.device)
         log_string(log, '------------ End -------------\n')
 
         self.best_epoch = 0
 
-        self.device = torch.device(f"cuda:{self.cuda}" if torch.cuda.is_available() else "cpu")
+
         self.build_model()
 
+
+
+        log_string(log, "dropout:{}".format(str(self.dropout)))
+
     def build_model(self):
-        self.model = STWave(self.heads, self.dims, self.layers, self.samples,
-                            self.localadj, self.spawave, self.temwave,
+        self.model = STWave(self.heads, self.dims, self.layers, self.norm_adj_matrix, self.dropout,
                             self.input_len, self.output_len).to(self.device)
         self.optimizer = torch.optim.Adam(self.model.parameters(),
-                                          lr=self.learning_rate)
+                                          lr=self.learning_rate).to(self.device)
         self.lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer,
                                                                        mode='min', factor=0.1, patience=20,
                                                                        verbose=False, threshold=0.001,
                                                                        threshold_mode='rel',
-                                                                       cooldown=0, min_lr=2e-6, eps=1e-08)
+                                                                       cooldown=0, min_lr=2e-6, eps=1e-08).to(self.device)
 
     def vali(self):
         self.model.eval()
@@ -94,7 +101,7 @@ class Solver(object):
         min_loss = 10000000.0
         num_train = self.trainX.shape[0]
 
-        for epoch in tqdm(range(1, self.max_epoch + 1)):
+        for epoch in range(1, self.max_epoch + 1):
             self.model.train()
             train_l_sum, train_acc_sum, n, batch_count, start = 0.0, 0.0, 0, 0, time.time()
             permutation = np.random.permutation(num_train)
@@ -102,36 +109,38 @@ class Solver(object):
             self.trainY = self.trainY[permutation]
             self.trainTE = self.trainTE[permutation]
             num_batch = math.ceil(num_train / self.batch_size)
-            with tqdm(total=num_batch) as pbar:
-                for batch_idx in range(num_batch):
-                    start_idx = batch_idx * self.batch_size
-                    end_idx = min(num_train, (batch_idx + 1) * self.batch_size)
+            # with tqdm(total=num_batch, desc=f"Epoch {epoch}/{self.max_epoch}") as pbar:
+            pbar = tqdm(total=num_batch, desc=f'Epoch {epoch}/{self.max_epoch}')
+            for batch_idx in range(num_batch):
+                start_idx = batch_idx * self.batch_size
+                end_idx = min(num_train, (batch_idx + 1) * self.batch_size)
 
-                    # disentangle x -> xl, xh
-                    # level = 1 采用1级的小波变换
-                    XL, XH = disentangle(self.trainX[start_idx: end_idx], self.wave, self.level)
-                    YL, _ = disentangle(self.trainY[start_idx: end_idx], self.wave, self.level)
-                    Y = torch.from_numpy(self.trainY[start_idx: end_idx]).float().to(self.device)
-                    TE = torch.from_numpy(self.trainTE[start_idx: end_idx, :, 0, :]).to(self.device)
-                    # XL, XH: [B, T, N, F]
-                    # TE: [B,T,2]
-                    XL, XH, YL = torch.from_numpy((XL - self.mean) / self.std).float().to(self.device), torch.from_numpy((XH - self.mean) / self.std).float().to(self.device), torch.from_numpy(YL).float().to(self.device)
+                # disentangle x -> xl, xh
+                # level = 1 采用1级的小波变换
+                XL, XH = disentangle(self.trainX[start_idx: end_idx], self.wave, self.level)
+                YL, _ = disentangle(self.trainY[start_idx: end_idx], self.wave, self.level)
+                Y = torch.from_numpy(self.trainY[start_idx: end_idx]).float().to(self.device)
+                TE = torch.from_numpy(self.trainTE[start_idx: end_idx, :, 0, :]).to(self.device)
+                # XL, XH: [B, T, N, F]
+                # TE: [B,T,2]
+                XL, XH, YL = torch.from_numpy((XL - self.mean) / self.std).float().to(self.device), torch.from_numpy((XH - self.mean) / self.std).float().to(self.device), torch.from_numpy(YL).float().to(self.device)
 
-                    self.optimizer.zero_grad()
-                    # y_hat_h, y_hat_l.shape = [B, T, N, 1]
-                    y_hat_h, y_hat_l = self.model(XL, XH, TE)
-                    # Loss_events + Loss_trend
-                    loss = _compute_loss(Y, y_hat_h * self.std + self.mean) + _compute_loss(YL, y_hat_l * self.std + self.mean)
+                self.optimizer.zero_grad()
+                # y_hat_h, y_hat_l.shape = [B, T, N, 1]
+                y_hat_h, y_hat_l = self.model(XL, XH, TE)
+                # Loss_events + Loss_trend
+                loss = _compute_loss(Y, y_hat_h * self.std + self.mean) + _compute_loss(YL, y_hat_l * self.std + self.mean)
 
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5)
-                    self.optimizer.step()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5)
+                self.optimizer.step()
 
-                    train_l_sum += loss.cpu().item()
+                train_l_sum += loss.cpu().item()
 
-                    n += Y.shape[0]
-                    batch_count += 1
-                    pbar.update(1)
+                n += Y.shape[0]
+                batch_count += 1
+                pbar.update(1)
+            pbar.close()
             log_string(log, 'epoch %d, lr %.6f, loss %.4f, time %.1f sec'
                        % (epoch, self.optimizer.param_groups[0]['lr'], train_l_sum / batch_count, time.time() - start))
             mae, rmse, mape = self.vali()
@@ -140,6 +149,7 @@ class Solver(object):
                 self.best_epoch = epoch
                 min_loss = mae[-1]
                 torch.save(self.model.state_dict(), self.model_file)
+
 
         log_string(log, f'Best epoch is: {self.best_epoch}')
 
@@ -161,8 +171,7 @@ class Solver(object):
                     XL, XH = disentangle(self.testX[start_idx: end_idx], self.wave, self.level)
                     Y = self.testY[start_idx: end_idx]
                     TE = torch.from_numpy(self.testTE[start_idx: end_idx, :, 0, :]).to(self.device)
-                    XL, XH = torch.from_numpy((XL - self.mean) / self.std).float().to(self.device), torch.from_numpy(
-                        (XH - self.mean) / self.std).float().to(self.device)
+                    XL, XH = torch.from_numpy((XL - self.mean) / self.std).float().to(self.device), torch.from_numpy((XH - self.mean) / self.std).float().to(self.device)
 
                     y_hat, _ = self.model(XL, XH, TE)
 
@@ -219,6 +228,7 @@ if __name__ == '__main__':
     parser.add_argument('--wave', default=config['param']['wave'])
     parser.add_argument('--level', type=int, default=config['param']['level'])
     parser.add_argument('--samples', type=float, default=config['param']['samples'])
+    parser.add_argument('--dropout', type=float, default=config['param']['dropout'])
 
     parser.add_argument('--traffic_file', default=config['file']['traffic'])
     parser.add_argument('--adj_file', default=config['file']['adj'])
@@ -228,7 +238,7 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     log_file = str(args.log_file) + str(time.strftime("%Y-%m-%d_%H-%M-%S")) + ".log"
-    log = open(args.log_file, 'w')
+    log = open(log_file, 'w')
 
     if args.seed is not None:
         random.seed(args.seed)
