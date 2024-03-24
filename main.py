@@ -31,24 +31,19 @@ class Solver(object):
         log_string(log, '------------ End -------------\n')
 
         self.best_epoch = 0
-
-
         self.build_model()
 
-
-
-        log_string(log, "dropout:{}".format(str(self.dropout)))
 
     def build_model(self):
         self.model = STWave(self.heads, self.dims, self.layers, self.norm_adj_matrix, self.dropout,
                             self.input_len, self.output_len).to(self.device)
         self.optimizer = torch.optim.Adam(self.model.parameters(),
-                                          lr=self.learning_rate).to(self.device)
+                                          lr=self.learning_rate)
         self.lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer,
                                                                        mode='min', factor=0.1, patience=20,
                                                                        verbose=False, threshold=0.001,
                                                                        threshold_mode='rel',
-                                                                       cooldown=0, min_lr=2e-6, eps=1e-08).to(self.device)
+                                                                       cooldown=0, min_lr=2e-6, eps=1e-08)
 
     def vali(self):
         self.model.eval()
